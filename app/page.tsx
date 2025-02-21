@@ -8,21 +8,19 @@ import Image from "next/image";
 import React, { useState } from "react";
 import { Toaster } from "react-hot-toast";
 
-// Update the Avatar interface to include an image URL
+// Update the Avatar interface
 interface Avatar {
   name: string;
   simli_faceid: string;
-  elevenlabs_voiceid: string;
   initialPrompt: string;
 }
 
-// Updated JSON structure for avatar data with image URLs
+// Avatar data
 const avatar: Avatar = {
-  name: "Chrystal",
-  simli_faceid: "b7da5ed1-2abc-47c8-b7a6-0b018e031a26",
-  elevenlabs_voiceid: "cgSgspJ2msm6clMCkdW9",
+  name: "Fernando",
+  simli_faceid: "e99c1a3c-a6c9-4446-8ae4-c529e5d2423c",
   initialPrompt:
-    "You are a support agent for Simli and you're living in local Create-Simli-App, the interactive demo for Simli that you can start building from. You can swap me out with other characters.",
+    "Você é o Fernando, um assistente virtual amigável e profissional. Você deve sempre responder em português do Brasil de forma clara e objetiva. Mantenha um tom conversacional mas profissional. Você deve ser prestativo e tentar ajudar o usuário da melhor forma possível.",
 };
 
 const Demo: React.FC = () => {
@@ -56,7 +54,6 @@ const Demo: React.FC = () => {
           {showDottedFace && <DottedFace />}
           <AvatarInteraction
             simli_faceid={avatar.simli_faceid}
-            elevenlabs_voiceid={avatar.elevenlabs_voiceid}
             initialPrompt={avatar.initialPrompt}
             onStart={onStart}
             showDottedFace={showDottedFace}
@@ -77,7 +74,7 @@ const Demo: React.FC = () => {
             avatar.
           </li>
           <li className="mb-1">
-            You can replace the avatar's face and voice and initial prompt with
+            You can replace the avatar's face and initial prompt with
             your own. Do this by editing <code>app/page.tsx</code>.
           </li>
         </ul>

@@ -13,26 +13,18 @@ const API_KEY_CONFIGS: ApiKeyConfig[] = [
         required: true
     },
     {
-        key: 'ELEVENLABS_API_KEY',
-        name: 'ElevenLabs',
-        pattern: /^(?:[a-f0-9]{32}|sk-[A-Za-z0-9-]{45,60})$/,  // 32 char hex or sk-none- format
+        key: 'GOOGLE_GEMINI_API_KEY',
+        name: 'Google Gemini',
         required: true
     },
     {
-        key: 'OPENAI_API_KEY',
-        name: 'OpenAI',
-        pattern: /^sk-[A-Za-z0-9-]{45,60}$/,  // starts with sk- followed by 45-57 chars (total 48-60)
-        required: true
-    },
-    {
-        key: 'DEEPGRAM_API_KEY',
-        name: 'Deepgram',
-        pattern: /^[a-f0-9]{40}$/,  // 40 char hex
+        key: 'GOOGLE_CLOUD_TTS_KEY',
+        name: 'Google Cloud TTS',
         required: true
     }
 ];
 
-export function validateApiKeys(): { valid: boolean; errors: string[] } {
+export function validateApiKeys() {
     const errors: string[] = [];
 
     for (const config of API_KEY_CONFIGS) {

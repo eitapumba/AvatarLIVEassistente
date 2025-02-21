@@ -11,6 +11,8 @@
   },
   "dependencies": {
     "@deepgram/sdk": "^3.5.1",
+    "@google-cloud/text-to-speech": "^5.8.0",
+    "@google/generative-ai": "^0.22.0",
     "axios": "^1.7.5",
     "clsx": "^2.1.1",
     "cors": "^2.8.5",
