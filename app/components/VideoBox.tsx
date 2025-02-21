@@ -7,7 +7,7 @@ interface VideoBoxProps {
 
 export default function VideoBox({ video, audio }: VideoBoxProps) {
   return (
-    <div className="aspect-video flex items-center h-[350px] w-[350px] justify-center bg-simligray">
+    <div className="aspect-video flex items-center h-[280px] w-[280px] justify-center bg-simligray rounded-lg overflow-hidden">
       <video 
         ref={video}
         autoPlay 

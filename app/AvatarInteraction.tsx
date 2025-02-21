@@ -22,10 +22,14 @@ const AvatarInteraction: React.FC<AvatarInteractionProps> = ({
   const [isAvatarVisible, setIsAvatarVisible] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [error, setError] = useState('');
+  const [connectionState, setConnectionState] = useState<'idle' | 'connecting' | 'connected' | 'error'>('idle');
+  
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const simliClientRef = useRef<SimliClient | null>(null);
+  const connectionAttempts = useRef(0);
+  const maxAttempts = 3;
 
   // Criar SimliClient apenas quando necessário
   const getSimliClient = useCallback(() => {
@@ -35,79 +39,108 @@ const AvatarInteraction: React.FC<AvatarInteractionProps> = ({
     return simliClientRef.current;
   }, []);
 
-  const initializeSimliClient = useCallback(() => {
-    if (videoRef.current && audioRef.current) {
-      console.log('Inicializando SimliClient...');
-      const client = getSimliClient();
-
-      client.Initialize({
-        apiKey: process.env.NEXT_PUBLIC_SIMLI_API_KEY || '',
-        faceID: simli_faceid,
-        handleSilence: false,
-        maxSessionLength: 300,
-        maxIdleTime: 150,
-        videoRef: videoRef,
-        audioRef: audioRef
-      });
-
-      console.log('SimliClient inicializado');
-    } else {
-      console.error('Video ou Audio ref não estão prontos');
-      throw new Error('Refs não estão prontos');
-    }
-  }, [simli_faceid, getSimliClient]);
-
   const cleanupConnections = useCallback(() => {
-    try {
-      if (simliClientRef.current) {
-        simliClientRef.current.close();
-        simliClientRef.current = null;
+    console.log('Limpando conexões...');
+    
+    // 1. Limpa WebSocket
+    if (socketRef.current) {
+      try {
+        if (socketRef.current.readyState === WebSocket.OPEN) {
+          socketRef.current.close();
+        }
+      } catch (error) {
+        console.error('Erro ao fechar WebSocket:', error);
       }
-      
-      if (socketRef.current) {
-        socketRef.current.close();
-        socketRef.current = null;
-      }
-    } catch (error) {
-      console.error('Erro ao limpar conexões:', error);
+      socketRef.current = null;
     }
-  }, []);
 
-  const handleStop = useCallback(() => {
-    setIsLoading(false);
-    setError('');
+    // 2. Limpa SimliClient
+    if (simliClientRef.current) {
+      try {
+        simliClientRef.current.ClearBuffer();
+      } catch (error) {
+        console.error('Erro ao limpar SimliClient:', error);
+      }
+      simliClientRef.current = null;
+    }
+
+    // 3. Reseta estados
     setIsAvatarVisible(false);
     setIsListening(false);
+    setConnectionState('idle');
+    setError('');
+    setIsLoading(false);
+  }, []);
+
+  const resetState = useCallback(() => {
     cleanupConnections();
-  }, [cleanupConnections]);
+    onStart();
+  }, [cleanupConnections, onStart]);
 
-  const processAudioData = useCallback((arrayBuffer: ArrayBuffer) => {
-    if (!arrayBuffer || arrayBuffer.byteLength === 0) return;
-    const client = simliClientRef.current;
-    if (!client) return;
+  const handleStop = useCallback(() => {
+    console.log('Parando sistema...');
+    setIsListening(false); // Primeiro desativa o microfone
+    setTimeout(() => {
+      resetState(); // Depois limpa o resto
+    }, 100); // Delay necessário entre desativar microfone e resetar estado
+  }, [resetState]);
 
+  const initializeSimliClient = useCallback(() => {
+    if (!videoRef.current || !audioRef.current) {
+      throw new Error('Refs não estão prontos');
+    }
+
+    console.log('Inicializando SimliClient...');
+    const client = getSimliClient();
+
+    client.Initialize({
+      apiKey: process.env.NEXT_PUBLIC_SIMLI_API_KEY || '',
+      faceID: simli_faceid,
+      handleSilence: false,
+      maxSessionLength: 300,
+      maxIdleTime: 150,
+      videoRef: videoRef,
+      audioRef: audioRef
+    });
+
+    return client;
+  }, [simli_faceid, getSimliClient]);
+
+  const processAudioData = useCallback(async (audioData: ArrayBuffer) => {
     try {
-      const audioData = new Int16Array(arrayBuffer);
-      if (audioData.length === 0) {
-        console.warn('Buffer de áudio vazio recebido');
+      if (!simliClientRef.current) {
+        console.warn('SimliClient não inicializado. Ignorando dados de áudio.');
         return;
       }
 
-      const uint8Data = new Uint8Array(audioData.buffer);
-      const chunkSize = 4096;
-      
-      console.log(`Processando áudio: ${uint8Data.length} bytes em chunks de ${chunkSize}`);
-      
-      for (let i = 0; i < uint8Data.length; i += chunkSize) {
-        const chunk = uint8Data.slice(i, Math.min(i + chunkSize, uint8Data.length));
-        if (chunk.length > 0) {
-          client.sendAudioData(chunk);
+      // Converte ArrayBuffer para Uint8Array
+      const uint8Data = new Uint8Array(audioData);
+
+      // Tenta enviar o áudio com retry
+      let retryCount = 0;
+      const maxRetries = 3;
+      const retryDelay = 100;
+
+      const sendAudioWithRetry = async (): Promise<void> => {
+        try {
+          await simliClientRef.current?.sendAudioData(uint8Data);
+        } catch (error) {
+          console.error(`Erro ao enviar chunk de áudio (tentativa ${retryCount + 1}):`, error);
+          if (retryCount < maxRetries) {
+            retryCount++;
+            await new Promise(resolve => setTimeout(resolve, retryDelay));
+            return sendAudioWithRetry();
+          }
+          throw error;
         }
-      }
+      };
+
+      await sendAudioWithRetry();
     } catch (error) {
-      console.error('Erro ao processar áudio:', error);
+      console.error('Erro fatal ao processar áudio:', error);
+      handleStop();
     }
-  }, []);
+  }, [handleStop]);
 
   const initializeWebSocket = useCallback((connectionId: string, retryCount = 0) => {
     try {
@@ -130,7 +163,7 @@ const AvatarInteraction: React.FC<AvatarInteractionProps> = ({
             handleStop();
           }
         }
-      }, 5000);
+      }, 5000); // Timeout WebSocket conforme documentação
 
       socketRef.current.onopen = () => {
         clearTimeout(wsTimeout);
@@ -159,6 +192,7 @@ const AvatarInteraction: React.FC<AvatarInteractionProps> = ({
       socketRef.current.onerror = (error) => {
         console.error(`Erro no WebSocket (ID: ${connectionId}):`, error);
         setError('Erro na conexão WebSocket. Verifique se o servidor está rodando.');
+        handleStop();
       };
 
       socketRef.current.onclose = (event) => {
@@ -208,158 +242,105 @@ const AvatarInteraction: React.FC<AvatarInteractionProps> = ({
   }, [initialPrompt, initializeWebSocket, handleStop]);
 
   const handleStart = useCallback(async () => {
-    setIsLoading(true);
-    setError('');
-    onStart();
-
     try {
-      console.log('Iniciando sistema...');
+      if (connectionState !== 'idle') {
+        console.log('Sistema já está inicializando ou conectado');
+        return;
+      }
+
+      resetState();
+      setIsLoading(true);
+      setConnectionState('connecting');
+      onStart();
       
-      // 1. Primeiro inicializa o SimliClient
-      initializeSimliClient();
-      console.log('SimliClient inicializado');
+      // Mostra o avatar imediatamente
+      setIsAvatarVisible(true);
+      console.log('Avatar visível, iniciando conexões...');
 
-      // 2. Aguarda a conexão do SimliClient
-      await new Promise<void>((resolve, reject) => {
-        let connectionTimeout: NodeJS.Timeout;
-        let tracksReceived = { audio: false, video: false };
-        let iceConnected = false;
-        let retryCount = 0;
-        const MAX_RETRIES = 3;
+      // 1. Solicitar permissão do microfone em background
+      try {
+        console.log('Solicitando permissão do microfone...');
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach(track => track.stop());
+        console.log('Permissão do microfone concedida');
+      } catch (error) {
+        console.error('Erro ao solicitar microfone:', error);
+        throw new Error('Por favor, permita o acesso ao microfone para continuar.');
+      }
+      
+      // 2. Inicializa SimliClient e aguarda conexão
+      try {
+        const client = initializeSimliClient();
+        console.log('SimliClient inicializado');
 
-        const checkConnection = () => {
-          console.log(`Verificando conexão - Tracks Audio: ${tracksReceived.audio}, Video: ${tracksReceived.video}, ICE: ${iceConnected}`);
-          if (iceConnected) {
-            clearTimeout(connectionTimeout);
-            console.log('Conexão ICE estabelecida, ativando avatar...');
-            setIsAvatarVisible(true);
-            // Aguarda um momento para iniciar o reconhecimento de voz
-            setTimeout(() => {
-              if (iceConnected) {
-                console.log('Iniciando reconhecimento de voz...');
-                setIsListening(true);
-                resolve();
-              }
-            }, 2000);
-          }
-        };
-
-        const handleTrack = (track: MediaStreamTrack) => {
-          console.log('Track recebido:', track.kind);
-          if (track.kind === 'audio') {
-            tracksReceived.audio = true;
-          } else if (track.kind === 'video') {
-            tracksReceived.video = true;
-          }
-          console.log('Estado dos tracks atualizado:', tracksReceived);
-        };
-
-        const handleInitialConnect = () => {
-          console.log('SimliClient conectado com sucesso');
-          iceConnected = true;
-          checkConnection();
-        };
-
-        const handleIceState = (state: string) => {
-          console.log('Estado ICE:', state);
-          if (state === 'connected' || state === 'completed') {
-            iceConnected = true;
-            checkConnection();
-          } else if (state === 'disconnected' || state === 'failed') {
-            console.log('ICE desconectado ou falhou, tentando reconexão...');
-            iceConnected = false;
-            setIsAvatarVisible(false);
-            setIsListening(false);
-            retryConnection();
-          }
-        };
-
-        const retryConnection = () => {
-          if (retryCount < MAX_RETRIES) {
-            retryCount++;
-            console.log(`Tentativa ${retryCount} de ${MAX_RETRIES}`);
-            tracksReceived = { audio: false, video: false };
-            iceConnected = false;
-            
-            // Limpa o cliente atual
-            const client = simliClientRef.current;
-            if (client) {
-              client.off('connected', handleInitialConnect);
-              client.off('error', handleInitialError);
-              client.off('track', handleTrack);
-              client.off('iceConnectionStateChange', handleIceState);
-              client.close();
-              simliClientRef.current = null;
+        // Aguarda conexão inicial
+        await new Promise<void>((resolve, reject) => {
+          let isResolved = false;
+          const iceTimeout = setTimeout(() => {
+            if (!isResolved) {
+              console.log('Timeout na espera da conexão ICE, continuando...');
+              isResolved = true;
+              resolve();
             }
+          }, 8000); // Timeout ICE conforme documentação
 
-            // Aguarda antes de tentar novamente
-            setTimeout(() => {
-              console.log('Tentando reconexão...');
-              initializeSimliClient();
-              const newClient = simliClientRef.current;
-              if (newClient) {
-                newClient.on('connected', handleInitialConnect);
-                newClient.on('error', handleInitialError);
-                newClient.on('track', handleTrack);
-                newClient.on('iceConnectionStateChange', handleIceState);
-                newClient.start();
-              }
-            }, 2000);
-          } else {
-            console.error('Máximo de tentativas de conexão atingido');
-            reject(new Error('Máximo de tentativas de conexão atingido'));
-          }
-        };
+          const handleIceState = (state: string) => {
+            console.log('Estado ICE:', state);
+            if ((state === 'connected' || state === 'completed') && !isResolved) {
+              clearTimeout(iceTimeout);
+              isResolved = true;
+              resolve();
+            }
+          };
 
-        const handleInitialError = (error: any) => {
-          console.error('Erro na conexão inicial do SimliClient:', error);
-          retryConnection();
-        };
+          const handleConnected = () => {
+            console.log('SimliClient conectado');
+            if (!isResolved) {
+              clearTimeout(iceTimeout);
+              isResolved = true;
+              resolve();
+            }
+          };
 
-        const client = simliClientRef.current;
-        if (!client) {
-          reject(new Error('SimliClient não inicializado'));
-          return;
-        }
+          const handleError = (error: any) => {
+            console.error('Erro no SimliClient:', error);
+            if (!isResolved) {
+              clearTimeout(iceTimeout);
+              isResolved = true;
+              reject(new Error('Erro na conexão com o avatar'));
+            }
+          };
 
-        client.on('connected', handleInitialConnect);
-        client.on('error', handleInitialError);
-        client.on('track', handleTrack);
-        client.on('iceConnectionStateChange', handleIceState);
+          client.on('track', (track: MediaStreamTrack) => {
+            console.log(`Track ${track.kind} recebido`);
+          });
 
-        client.start();
-        console.log('SimliClient.start() chamado');
+          client.on('connected', handleConnected);
+          client.on('error', handleError);
+          client.on('iceConnectionStateChange', handleIceState);
 
-        connectionTimeout = setTimeout(() => {
-          console.log('Verificando estado final da conexão antes do timeout');
-          console.log(`Estado atual - Audio: ${tracksReceived.audio}, Video: ${tracksReceived.video}, ICE: ${iceConnected}`);
-          if (!iceConnected) {
-            console.log('Timeout atingido, tentando reconexão...');
-            retryConnection();
-          }
-        }, 15000);
+          // Inicia a sessão após configurar os eventos
+          client.start();
+        });
 
-        return () => {
-          clearTimeout(connectionTimeout);
-          if (client) {
-            client.off('connected', handleInitialConnect);
-            client.off('error', handleInitialError);
-            client.off('track', handleTrack);
-            client.off('iceConnectionStateChange', handleIceState);
-          }
-        };
-      });
+      } catch (error) {
+        console.error('Erro ao inicializar SimliClient:', error);
+        throw new Error('Falha ao conectar com o avatar');
+      }
 
-      // 3. Depois inicia a conversa e WebSocket
+      // 3. Inicia conversa
       await startConversation();
-      console.log('Sistema inicializado com sucesso');
+      setConnectionState('connected');
+      setIsListening(true);
       setIsLoading(false);
-    } catch (error) {
-      console.error('Erro ao iniciar sistema:', error);
-      setError('Falha ao iniciar. Por favor, tente novamente.');
-      handleStop();
+      console.log('Sistema totalmente inicializado');
+
+    } catch (error: any) {
+      console.error('Erro fatal ao iniciar sistema:', error);
+      setError(error.message || 'Falha ao iniciar. Por favor, tente novamente.');
+      resetState();
     }
-  }, [onStart, startConversation, initializeSimliClient]);
+  }, [onStart, startConversation, initializeSimliClient, cleanupConnections, resetState, connectionState]);
 
   const handleTranscript = useCallback((transcript: string) => {
     if (socketRef.current?.readyState === WebSocket.OPEN) {
@@ -422,48 +403,43 @@ const AvatarInteraction: React.FC<AvatarInteractionProps> = ({
           "transition-all duration-300",
           showDottedFace ? "h-0 overflow-hidden opacity-0" : "h-auto opacity-100"
         )}
-        style={{ minHeight: isAvatarVisible ? '360px' : '0' }}
+        style={{ minHeight: isAvatarVisible ? '280px' : '0' }}
       >
         <VideoBox video={videoRef} audio={audioRef} />
       </div>
-      <div className="flex flex-col items-center">
+      <div className="absolute bottom-2 left-2">
         {!isAvatarVisible ? (
           <button
             onClick={handleStart}
             disabled={isLoading}
             className={cn(
-              "w-full h-[52px] mt-4 disabled:bg-[#343434] disabled:text-white disabled:hover:rounded-[100px] bg-simliblue text-white py-3 px-6 rounded-[100px] transition-all duration-300 hover:text-black hover:bg-white hover:rounded-sm",
+              "w-[40px] h-[40px] disabled:bg-[#343434] disabled:text-white disabled:hover:rounded-[100px] bg-simliblue text-white rounded-[100px] transition-all duration-300 hover:text-black hover:bg-white hover:rounded-sm",
               "flex justify-center items-center"
             )}
           >
             {isLoading ? (
-              <>
-                <IconSparkleLoader className="h-[20px] animate-loader" />
-                <span className="ml-2 font-abc-repro-mono">Conectando...</span>
-              </>
+              <IconSparkleLoader className="h-[16px] animate-loader" />
             ) : (
-              <span className="font-abc-repro-mono font-bold w-[164px]">
-                Iniciar Interação
-              </span>
+              <span className="font-abc-repro-mono font-bold">▶</span>
             )}
           </button>
         ) : (
-          <div className="flex items-center gap-4 w-full">
-            <button
-              onClick={handleStop}
-              className={cn(
-                "mt-4 group text-white flex-grow bg-red hover:rounded-sm hover:bg-white h-[52px] px-6 rounded-[100px] transition-all duration-300"
-              )}
-            >
-              <span className="font-abc-repro-mono group-hover:text-black font-bold w-[164px] transition-all duration-300">
-                Parar Interação
-              </span>
-            </button>
-          </div>
+          <button
+            onClick={handleStop}
+            className={cn(
+              "group text-white w-[40px] h-[40px] bg-red hover:rounded-sm hover:bg-white rounded-[100px] transition-all duration-300 flex items-center justify-center"
+            )}
+          >
+            <span className="font-abc-repro-mono group-hover:text-black font-bold transition-all duration-300">
+              ■
+            </span>
+          </button>
         )}
       </div>
       {error && (
-        <p className="mt-4 text-red-500 text-center">{error}</p>
+        <div className="absolute bottom-2 left-14 bg-black bg-opacity-50 rounded px-2 py-1">
+          <p className="text-red-500 text-sm">{error}</p>
+        </div>
       )}
       <SpeechRecognition
         onTranscript={handleTranscript}
